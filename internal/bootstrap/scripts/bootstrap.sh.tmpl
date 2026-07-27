@@ -1,0 +1,35 @@
+#!/bin/sh
+# mini-control-action runner bootstrap. Rendered by the service, staged into
+# the VM base64-encoded, launched detached via nohup. Progress is reported
+# through {{.StatusFile}} so the controller can poll cheaply.
+set -u
+
+STATUS="{{.StatusFile}}"
+phase() {
+  printf 'PHASE=%s\n' "$1" > "$STATUS.tmp" && mv "$STATUS.tmp" "$STATUS"
+}
+fail() {
+  printf 'PHASE=%s\nEXIT=1\n' "$1" > "$STATUS.tmp" && mv "$STATUS.tmp" "$STATUS"
+  exit 1
+}
+
+RUNNER_DIR="{{.PreinstalledPath}}"
+if [ -z "$RUNNER_DIR" ]; then
+  RUNNER_DIR="$HOME/actions-runner"
+  phase download
+  mkdir -p "$RUNNER_DIR" || fail download_failed
+  cd "$RUNNER_DIR" || fail download_failed
+  curl -fL --retry 3 --retry-delay 5 -o runner.tar.gz "{{.DownloadURL}}" || fail download_failed
+  phase extract
+  tar xzf runner.tar.gz || fail extract_failed
+fi
+
+cd "$RUNNER_DIR" || fail configure_failed
+[ -x ./run.sh ] || fail configure_failed
+
+phase run
+JIT="$(cat "{{.JITFile}}")" || fail configure_failed
+./run.sh --jitconfig "$JIT"
+EC=$?
+printf 'PHASE=done\nEXIT=%s\n' "$EC" > "$STATUS.tmp" && mv "$STATUS.tmp" "$STATUS"
+exit "$EC"

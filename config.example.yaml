@@ -1,0 +1,133 @@
+# ============================================================================
+# minicontrol-runner configuration
+#
+# Copy to config.yaml, mount into the container at
+# /etc/minicontrol-runner/config.yaml, and export the ${...} secrets as
+# environment variables. Only the ${VAR} form is expanded; unknown YAML keys
+# are a startup error, so typos fail fast.
+# ============================================================================
+
+log:
+  level: info        # debug | info | warn | error
+  format: json       # json (machine-readable) | text (human-friendly)
+
+# ---------------------------------------------------------------------------
+# HTTP listener: /healthz + read-only /status only. No ingress needed —
+# job discovery is pull-only.
+# ---------------------------------------------------------------------------
+server:
+  listen: ":8080"
+
+# ---------------------------------------------------------------------------
+# GitHub: where jobs come from and where runners get registered.
+# ---------------------------------------------------------------------------
+github:
+  # api_base_url: https://api.github.com # override only for GitHub Enterprise
+  scope: all                             # all:  serve EVERY repo the token can
+                                         #       access (fine-grained PAT: the
+                                         #       repos selected at creation);
+                                         #       runners register on the job's repo
+                                         # repo: a single owner/repo (set below)
+                                         # org:  org-level runners (set owner,
+                                         #       poll.repos)
+  # owner: your-github-user-or-org       # required for scope: repo | org
+  # repo: your-repo                      # required for scope: repo
+  runner_group_id: 1                     # required by generate-jitconfig at BOTH
+                                         # repo and org scope; 1 is the Default
+                                         # group in practice (undocumented)
+
+  auth:
+    # Personal access token. Classic: `repo` scope (repo runners) or
+    # `admin:org` (org runners). Fine-grained: Administration read/write +
+    # Actions read on the target repo. The owning account must have admin
+    # permission on the repo/org.
+    token: ${GITHUB_PAT}
+
+  poll:
+    interval: 60s                        # queued-job discovery cadence (pull-only)
+    # repos:                             # org scope only: which repos to poll
+    #   - your-org/repo-a
+
+# ---------------------------------------------------------------------------
+# mini-control: where the macOS VMs come from.
+#
+# !! The API key MUST be dedicated to this service. The reconciler treats
+# !! every VM visible under this key that it has no record of as a leak and
+# !! deletes it after reconciler.orphan_grace.
+# ---------------------------------------------------------------------------
+minicontrol:
+  base_url: https://your-worker-host.example.com/api/client/v1
+                                         # the deployment's WORKER hostname
+                                         # (the browser hostname 404s API keys)
+  api_key: ${MINICONTROL_API_KEY}        # mck_... from the mini-control console
+  sku: m4-big-v1                         # fixed preset: 8 CPU / 8 GiB / 150 GiB
+  worker_tag: ""                         # optional placement constraint, e.g.
+                                         # "cn-east-01". Sent as {"tag": ...},
+                                         # matched case-insensitively and
+                                         # exactly. No match => 409
+                                         # no_workers_matching_tag; a server
+                                         # without tag support => 400. Either
+                                         # way the create fails — the constraint
+                                         # is never dropped silently.
+                                         # NOTE: untagged creates skip workers
+                                         # whose tags end in a server-excluded
+                                         # suffix (default "test"), so a
+                                         # *-test worker needs this set.
+  poll_interval: 10s                     # GET /vms/{id} cadence while provisioning
+  provision_timeout: 12m                 # give up (and retry on a fresh VM) after
+  request_timeout: 30s                   # per-request HTTP timeout (exec excluded)
+
+# ---------------------------------------------------------------------------
+# The GitHub Actions runner installed inside each VM. One VM = one runner =
+# one job (JIT/ephemeral registration; the runner exits after a single job).
+# ---------------------------------------------------------------------------
+runner:
+  labels: [self-hosted, macos, arm64, mini-control]
+                                         # a queued job is picked up only if its
+                                         # runs-on labels are a subset of these
+  version: latest                        # "latest" (resolved via GitHub releases)
+                                         # or pinned, e.g. "2.325.0"
+  download_url: ""                       # optional mirror template; {version} is
+                                         # substituted. Useful when VM egress to
+                                         # github.com is slow (fresh VM each job).
+  preinstalled_path: ""                  # runner dir baked into the VM base
+                                         # image; skips download entirely
+  name_prefix: mc                        # runner name: <prefix>-<vmid8>-j<jobid>
+                                         # (encodes VM<->job mapping for recovery)
+  work_dir: _work                        # relative to the runner install dir
+                                         # (GitHub's documented contract)
+  status_poll_interval: 20s              # in-VM status marker poll cadence
+  pickup_timeout: 10m                    # runner online but no job assigned ->
+                                         # assume stolen/cancelled, tear down
+  max_job_duration: 2h                   # hard cap; VM is deleted afterwards
+
+# ---------------------------------------------------------------------------
+# Fleet-level guard rails.
+# ---------------------------------------------------------------------------
+limits:
+  max_concurrent_vms: 4                  # queued jobs beyond this wait (FIFO)
+  max_retries_per_job: 2                 # fresh-VM retries after infra failures
+  capacity_backoff:                      # server said 409 no_slots_available
+    initial: 30s
+    max: 5m
+
+# ---------------------------------------------------------------------------
+# The safety net that guarantees VMs die (billing runs until deletion!):
+# re-issues stuck deletes, re-adopts records after restart, deletes VMs that
+# have no state record (orphans), prunes stale runner registrations.
+# ---------------------------------------------------------------------------
+reconciler:
+  interval: 60s
+  orphan_grace: 3m                       # how long an unknown VM may exist
+                                         # before it is presumed leaked; must
+                                         # exceed the create->persist window
+
+state:
+  path: /var/lib/minicontrol-runner/state.json
+                                         # survives restarts; mount a volume.
+                                         # Losing it is safe-ish: the reconciler
+                                         # deletes the then-orphaned VMs.
+
+debug:
+  stream_bootstrap_logs: false           # stream bootstrap output via SSE
+                                         # instead of polling (verbose)

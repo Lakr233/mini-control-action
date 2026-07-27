@@ -1,0 +1,27 @@
+services:
+  minicontrol-runner:
+    # Deploys pull the published image; `docker compose build` still works
+    # for local development (tags the same name).
+    image: ghcr.io/lakr233/mini-control-action:main
+    build: .
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    ports:
+      - "127.0.0.1:18080:8080" # /healthz + /status (local only)
+    environment:
+      MINICONTROL_API_KEY: ${MINICONTROL_API_KEY}
+      GITHUB_PAT: ${GITHUB_PAT}
+    volumes:
+      - ./config.yaml:/etc/minicontrol-runner/config.yaml:ro
+      - runner-state:/var/lib/minicontrol-runner
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/minicontrol-runner", "--healthcheck", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+
+volumes:
+  runner-state:
